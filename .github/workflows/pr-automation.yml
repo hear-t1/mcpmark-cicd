@@ -1,0 +1,470 @@
+name: Pull Request Automation
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: |
+          echo "Running ESLint checks..."
+          npm run lint
+        continue-on-error: true
+
+      - name: Run Prettier check
+        id: prettier
+        run: |
+          echo "Running Prettier formatting check..."
+          npx prettier --check src/
+        continue-on-error: true
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const eslintStatus = steps.eslint.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            const prettierStatus = steps.prettier.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            
+            const report = `
+### 📊 Code Quality Report
+
+| Check | Status | Details |
+|-------|--------|---------|
+| **ESLint** | ${eslintStatus} | Code style and syntax validation |
+| **Prettier** | ${prettierStatus} | Code formatting consistency |
+
+**Summary:**
+- ESLint ensures code follows established patterns and catches potential errors
+- Prettier maintains consistent code formatting across the codebase
+
+**Next Steps:**
+${eslintStatus === '❌ Failed' ? '- Run `npm run lint:fix` to automatically fix ESLint issues\n' : ''}
+${prettierStatus === '❌ Failed' ? '- Run `npm run format` to automatically format code with Prettier\n' : ''}
+${eslintStatus === '✅ Passed' && prettierStatus === '✅ Passed' ? '- ✅ All code quality checks passed!' : ''}
+            `;
+
+            // Check if a comment already exists from this workflow
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const existingComment = comments.find(comment => 
+              comment.body.includes('Code Quality Report') && 
+              comment.user.login === 'github-actions[bot]'
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: report
+              });
+            }
+
+  testing-suite:
+    name: Testing Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        id: tests
+        run: |
+          echo "Running test suite with coverage..."
+          npm run test:coverage
+        continue-on-error: true
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const testStatus = steps.tests.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            
+            // Try to read coverage summary if available
+            let coverageSummary = 'Coverage report not available';
+            try {
+              const fs = require('fs');
+              const path = require('path');
+              const coveragePath = path.join(process.env.GITHUB_WORKSPACE, 'coverage/coverage-summary.json');
+              
+              if (fs.existsSync(coveragePath)) {
+                const coverageData = JSON.parse(fs.readFileSync(coveragePath, 'utf8'));
+                const total = coverageData.total;
+                
+                coverageSummary = `
+**Coverage Summary:**
+- **Lines:** ${total.lines.pct}% (${total.lines.covered}/${total.lines.total})
+- **Statements:** ${total.statements.pct}% (${total.statements.covered}/${total.statements.total})
+- **Functions:** ${total.functions.pct}% (${total.functions.covered}/${total.functions.total})
+- **Branches:** ${total.branches.pct}% (${total.branches.covered}/${total.branches.total})
+                `;
+              }
+            } catch (error) {
+              coverageSummary = 'Unable to generate coverage summary';
+            }
+
+            const report = `
+### 🧪 Test Coverage Report
+
+**Test Status:** ${testStatus}
+
+${coverageSummary}
+
+**Artifacts:**
+- Coverage report available as downloadable artifact
+
+**Next Steps:**
+${testStatus === '❌ Failed' ? '- Review test failures and ensure all tests pass before merging\n' : ''}
+${testStatus === '✅ Passed' ? '- ✅ All tests passed with coverage requirements met!' : ''}
+            `;
+
+            // Check if a comment already exists from this workflow
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const existingComment = comments.find(comment => 
+              comment.body.includes('Test Coverage Report') && 
+              comment.user.login === 'github-actions[bot]'
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: report
+              });
+            }
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        id: npm-audit
+        run: |
+          echo "Running npm audit for dependency vulnerabilities..."
+          npm audit --audit-level=moderate
+        continue-on-error: true
+
+      - name: Secret scanning
+        id: secret-scan
+        run: |
+          echo "Scanning for secrets in code changes..."
+          # Simple regex-based secret scanning
+          echo "Checking for common secret patterns..."
+          if git diff HEAD~1 --name-only | xargs grep -lE "(password|secret|token|key)[[:space:]]*[=:][[:space:]]*['\"]?[A-Za-z0-9]{10,}['\"]?" 2>/dev/null; then
+            echo "Potential secrets found in changed files"
+            exit 1
+          else
+            echo "No obvious secrets detected"
+          fi
+        continue-on-error: true
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const auditStatus = steps.npmAudit.outcome === 'success' ? '✅ Passed' : '⚠️ Warnings';
+            const secretScanStatus = steps.secretScan.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            
+            const report = `
+### 🔒 Security Scan Report
+
+| Check | Status | Details |
+|-------|--------|---------|
+| **Dependency Vulnerabilities** | ${auditStatus} | npm audit for known vulnerabilities |
+| **Secret Detection** | ${secretScanStatus} | Scan for exposed secrets in code |
+
+**Security Assessment:**
+${auditStatus === '⚠️ Warnings' ? '- ⚠️ Dependency vulnerabilities detected. Run `npm audit fix` to address issues.\n' : '- ✅ No critical dependency vulnerabilities found\n'}
+${secretScanStatus === '❌ Failed' ? '- ❌ Potential secrets detected in code changes. Review and remove any sensitive information.\n' : '- ✅ No obvious secrets detected in code changes\n'}
+
+**Recommendations:**
+1. Regularly update dependencies to patch security vulnerabilities
+2. Never commit API keys, passwords, or other secrets to version control
+3. Use environment variables for sensitive configuration
+            `;
+
+            // Check if a comment already exists from this workflow
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const existingComment = comments.find(comment => 
+              comment.body.includes('Security Scan Report') && 
+              comment.user.login === 'github-actions[bot]'
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: report
+              });
+            }
+
+  build-validation:
+    name: Build Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build validation
+        id: build
+        run: |
+          echo "Validating build process..."
+          npm run build
+          echo "✅ Build validation successful"
+        continue-on-error: true
+
+      - name: Start application for endpoint validation
+        id: start-app
+        run: |
+          echo "Starting application for endpoint validation..."
+          npm start &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> $GITHUB_ENV
+          
+          # Wait for app to start
+          sleep 5
+          
+          # Check if app is running
+          if ps -p $APP_PID > /dev/null; then
+            echo "✅ Application started successfully"
+          else
+            echo "❌ Application failed to start"
+            exit 1
+          fi
+        continue-on-error: true
+
+      - name: Validate endpoints
+        id: validate-endpoints
+        if: steps.start-app.outcome == 'success'
+        run: |
+          echo "Validating application endpoints..."
+          
+          # Health check endpoint
+          curl -f http://localhost:3000/health || exit 1
+          echo "✅ Health endpoint accessible"
+          
+          # Additional endpoint checks can be added here
+          echo "✅ All endpoints validated successfully"
+        continue-on-error: true
+
+      - name: Stop application
+        if: always() && env.APP_PID
+        run: |
+          echo "Stopping application..."
+          kill $APP_PID 2>/dev/null || true
+
+      - name: Create deployment preview artifacts
+        if: always()
+        run: |
+          echo "Creating deployment preview artifacts..."
+          mkdir -p deployment-preview
+          echo "Deployment preview for PR #${{ github.event.pull_request.number }}" > deployment-preview/README.md
+          echo "Branch: ${{ github.head_ref }}" >> deployment-preview/README.md
+          echo "Commit: ${{ github.sha }}" >> deployment-preview/README.md
+          echo "Timestamp: $(date)" >> deployment-preview/README.md
+          
+          # Create a simple deployment manifest
+          cat > deployment-preview/deployment-manifest.json << EOF
+          {
+            "application": "mcpmark-cicd",
+            "pr_number": ${{ github.event.pull_request.number }},
+            "branch": "${{ github.head_ref }}",
+            "commit_sha": "${{ github.sha }}",
+            "build_status": "${{ steps.build.outcome }}",
+            "validation_status": "${{ steps.validate-endpoints.outcome }}",
+            "timestamp": "$(date -Iseconds)"
+          }
+          EOF
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-preview
+          path: deployment-preview/
+          retention-days: 7
+
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const buildStatus = steps.build.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            const appStartStatus = steps.startApp.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            const endpointStatus = steps.validateEndpoints.outcome === 'success' ? '✅ Passed' : '❌ Failed';
+            
+            const overallStatus = buildStatus === '✅ Passed' && 
+                                 appStartStatus === '✅ Passed' && 
+                                 endpointStatus === '✅ Passed' ? '✅ All validations passed' : '❌ Validation issues';
+            
+            const report = `
+### 🏗️ Build Validation
+
+**Overall Status:** ${overallStatus}
+
+| Validation Step | Status | Details |
+|----------------|--------|---------|
+| **Build Process** | ${buildStatus} | Application build verification |
+| **Application Startup** | ${appStartStatus} | Service initialization check |
+| **Endpoint Accessibility** | ${endpointStatus} | API endpoint validation |
+
+**Deployment Preview:**
+- Artifacts generated for deployment preview
+- Application manifest created with build metadata
+
+**Next Steps:**
+${buildStatus === '❌ Failed' ? '- Review build errors and fix compilation issues\n' : ''}
+${appStartStatus === '❌ Failed' ? '- Check application startup configuration and dependencies\n' : ''}
+${endpointStatus === '❌ Failed' ? '- Verify API endpoints are properly configured and accessible\n' : ''}
+${overallStatus === '✅ All validations passed' ? '- ✅ Application is ready for deployment!' : ''}
+            `;
+
+            // Check if a comment already exists from this workflow
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+
+            const existingComment = comments.find(comment => 
+              comment.body.includes('Build Validation') && 
+              comment.user.login === 'github-actions[bot]'
+            );
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: report
+              });
+            }
